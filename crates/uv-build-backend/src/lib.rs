@@ -714,116 +714,9 @@ mod tests {
     /// platform-independent deterministic builds.
     #[test]
     fn built_by_uv_building() {
-        built_by_uv_building_with_backend(
-            &[],
-            "1d9ce1ce63195fbee07314c0b595ba9e063670da8d10c252c351b21e94e3f508",
-        );
-    }
-
-    #[test]
-    fn editable_wheel_compression() -> Result<(), Error> {
-        let _preview = uv_preview::test::with_features(&[]);
-        let source = Path::new("../../test/packages/built-by-uv");
-        let dist = TempDir::new()?;
-
-        let filename = build_wheel(source, dist.path(), None, MOCK_UV_VERSION, false)?;
-        let wheel = block_on(read_wheel(&dist.path().join(filename.to_string())));
-        let filename = build_editable(source, dist.path(), None, MOCK_UV_VERSION, false)?;
-        let editable = block_on(read_wheel(&dist.path().join(filename.to_string())));
-
-        for (archive, compression) in [
-            (wheel, Compression::Deflate),
-            (editable, Compression::Stored),
-        ] {
-            assert!(!archive.file().entries().is_empty());
-            for entry in archive.file().entries() {
-                let expected = if entry.dir()? {
-                    Compression::Stored
-                } else {
-                    compression
-                };
-                assert_eq!(entry.compression(), expected);
-            }
-        }
-        Ok(())
-    }
-
-    #[test]
-    fn built_by_uv_building_tar_codec() {
-        built_by_uv_building_with_backend(
-            &[PreviewFeature::TarCodec],
-            "88540014e8884fff1d6479c0c7315fcf497ba2a46f6db5c9f6e04f64a8620dcc",
-        );
-    }
-
-    fn built_by_uv_building_with_backend(
-        preview_features: &[PreviewFeature],
-        expected_source_dist_hash: &str,
-    ) {
-        let _preview = uv_preview::test::with_features(preview_features);
-        let built_by_uv = Path::new("../../test/packages/built-by-uv");
-        let src = TempDir::new().unwrap();
-        for dir in [
-            "src",
-            "tests",
-            "data-dir",
-            "third-party-licenses",
-            "assets",
-            "header",
-            "scripts",
-        ] {
-            copy_dir_all(built_by_uv.join(dir), src.path().join(dir)).unwrap();
-        }
-        for filename in [
-            "pyproject.toml",
-            "README.md",
-            "uv.lock",
-            "LICENSE-APACHE",
-            "LICENSE-MIT",
-        ] {
-            fs_err::copy(built_by_uv.join(filename), src.path().join(filename)).unwrap();
-        }
-
-        // Clear executable bit on Unix to build the same archive between Unix and Windows.
-        // This is a caveat to the determinism of the uv build backend: When a file has the
-        // executable in the source repository, it only has the executable bit on Unix, as Windows
-        // does not have the concept of the executable bit.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let path = src.path().join("scripts").join("whoami.sh");
-            let metadata = fs_err::metadata(&path).unwrap();
-            let mut perms = metadata.permissions();
-            perms.set_mode(perms.mode() & !0o111);
-            fs_err::set_permissions(&path, perms).unwrap();
-        }
-
-        // Redact the uv_build version to keep the hash stable across releases
-        let pyproject_toml = fs_err::read_to_string(src.path().join("pyproject.toml")).unwrap();
-        let current_requires = regex!(r#"requires = \["uv_build>=[0-9.]+,<[0-9.]+"\]"#);
-        let mocked_requires = r#"requires = ["uv_build>=1,<2"]"#;
-        let pyproject_toml = current_requires.replace(pyproject_toml.as_str(), mocked_requires);
-        fs_err::write(src.path().join("pyproject.toml"), pyproject_toml.as_bytes()).unwrap();
-
-        // Add some files to be excluded
-        let module_root = src.path().join("src").join("built_by_uv");
-        fs_err::create_dir_all(module_root.join("__pycache__")).unwrap();
-        File::create(module_root.join("__pycache__").join("compiled.pyc")).unwrap();
-        File::create(module_root.join("arithmetic").join("circle.pyc")).unwrap();
-        fs_err::create_dir_all(module_root.join("empty")).unwrap();
-        fs_err::create_dir_all(module_root.join("stale").join("__pycache__")).unwrap();
-        File::create(
-            module_root
-                .join("stale")
-                .join("__pycache__")
-                .join("compiled.pyc"),
-        )
-        .unwrap();
-
-        // Perform both the direct and the indirect build.
-        let dist = TempDir::new().unwrap();
-        let build = build(src.path(), dist.path()).unwrap();
-
+        let (src, dist, build) = prepare_built_by_uv(&[]);
+        let expected_source_dist_hash =
+            "1d9ce1ce63195fbee07314c0b595ba9e063670da8d10c252c351b21e94e3f508";
         let source_dist_path = dist.path().join(build.source_dist_filename.to_string());
         assert_eq!(
             build.source_dist_filename.to_string(),
@@ -952,6 +845,239 @@ mod tests {
         built_by_uv-0.1.0.dist-info/METADATA,sha256=m6EkVvKrGmqx43b_VR45LHD37IZxPYC0NI6Qx9_UXLE,474
         built_by_uv-0.1.0.dist-info/RECORD,,
         ");
+    }
+
+    #[test]
+    fn editable_wheel_compression() -> Result<(), Error> {
+        let _preview = uv_preview::test::with_features(&[]);
+        let source = Path::new("../../test/packages/built-by-uv");
+        let dist = TempDir::new()?;
+
+        let filename = build_wheel(source, dist.path(), None, MOCK_UV_VERSION, false)?;
+        let wheel = block_on(read_wheel(&dist.path().join(filename.to_string())));
+        let filename = build_editable(source, dist.path(), None, MOCK_UV_VERSION, false)?;
+        let editable = block_on(read_wheel(&dist.path().join(filename.to_string())));
+
+        for (archive, compression) in [
+            (wheel, Compression::Deflate),
+            (editable, Compression::Stored),
+        ] {
+            assert!(!archive.file().entries().is_empty());
+            for entry in archive.file().entries() {
+                let expected = if entry.dir()? {
+                    Compression::Stored
+                } else {
+                    compression
+                };
+                assert_eq!(entry.compression(), expected);
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn built_by_uv_building_tar_codec() {
+        let (src, dist, build) = prepare_built_by_uv(&[PreviewFeature::TarCodec]);
+        let expected_source_dist_hash =
+            "88540014e8884fff1d6479c0c7315fcf497ba2a46f6db5c9f6e04f64a8620dcc";
+        let source_dist_path = dist.path().join(build.source_dist_filename.to_string());
+        assert_eq!(
+            build.source_dist_filename.to_string(),
+            "built_by_uv-0.1.0.tar.gz"
+        );
+        // Check that the source dist is reproducible across platforms.
+        assert_eq!(
+            hex::encode(sha2::Sha256::digest(
+                fs_err::read(&source_dist_path).unwrap()
+            )),
+            expected_source_dist_hash
+        );
+        // Check both the files we report and the actual files
+        assert_snapshot!(format_file_list(build.source_dist_list_files, src.path()), @"
+        built_by_uv-0.1.0/PKG-INFO (generated)
+        built_by_uv-0.1.0/pyproject.toml (generated)
+        built_by_uv-0.1.0/pyproject.toml.orig (pyproject.toml)
+        built_by_uv-0.1.0/LICENSE-APACHE (LICENSE-APACHE)
+        built_by_uv-0.1.0/LICENSE-MIT (LICENSE-MIT)
+        built_by_uv-0.1.0/README.md (README.md)
+        built_by_uv-0.1.0/assets/data.csv (assets/data.csv)
+        built_by_uv-0.1.0/header/built_by_uv.h (header/built_by_uv.h)
+        built_by_uv-0.1.0/scripts/whoami.sh (scripts/whoami.sh)
+        built_by_uv-0.1.0/src/built_by_uv/__init__.py (src/built_by_uv/__init__.py)
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic/__init__.py (src/built_by_uv/arithmetic/__init__.py)
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic/circle.py (src/built_by_uv/arithmetic/circle.py)
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic/pi.txt (src/built_by_uv/arithmetic/pi.txt)
+        built_by_uv-0.1.0/src/built_by_uv/build-only.h (src/built_by_uv/build-only.h)
+        built_by_uv-0.1.0/src/built_by_uv/cli.py (src/built_by_uv/cli.py)
+        built_by_uv-0.1.0/third-party-licenses/PEP-401.txt (third-party-licenses/PEP-401.txt)
+        ");
+        assert_snapshot!(build.source_dist_contents.iter().join("\n"), @"
+        built_by_uv-0.1.0/
+        built_by_uv-0.1.0/LICENSE-APACHE
+        built_by_uv-0.1.0/LICENSE-MIT
+        built_by_uv-0.1.0/PKG-INFO
+        built_by_uv-0.1.0/README.md
+        built_by_uv-0.1.0/assets
+        built_by_uv-0.1.0/assets/data.csv
+        built_by_uv-0.1.0/header
+        built_by_uv-0.1.0/header/built_by_uv.h
+        built_by_uv-0.1.0/pyproject.toml
+        built_by_uv-0.1.0/pyproject.toml.orig
+        built_by_uv-0.1.0/scripts
+        built_by_uv-0.1.0/scripts/whoami.sh
+        built_by_uv-0.1.0/src
+        built_by_uv-0.1.0/src/built_by_uv
+        built_by_uv-0.1.0/src/built_by_uv/__init__.py
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic/__init__.py
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic/circle.py
+        built_by_uv-0.1.0/src/built_by_uv/arithmetic/pi.txt
+        built_by_uv-0.1.0/src/built_by_uv/build-only.h
+        built_by_uv-0.1.0/src/built_by_uv/cli.py
+        built_by_uv-0.1.0/third-party-licenses
+        built_by_uv-0.1.0/third-party-licenses/PEP-401.txt
+        ");
+
+        let wheel_path = dist.path().join(build.wheel_filename.to_string());
+        assert_eq!(
+            build.wheel_filename.to_string(),
+            "built_by_uv-0.1.0-py3-none-any.whl"
+        );
+        // Check that the wheel is reproducible across platforms.
+        assert_snapshot!(
+            hex::encode(sha2::Sha256::digest(fs_err::read(&wheel_path).unwrap())),
+            @"9e8d80fef76be79a7fe73a2ccac3bdd0132b10fdcff7271ca8b868c99061b8ce"
+        );
+        assert_snapshot!(build.wheel_contents.join("\n"), @"
+        built_by_uv-0.1.0.data/data/
+        built_by_uv-0.1.0.data/data/data.csv
+        built_by_uv-0.1.0.data/headers/
+        built_by_uv-0.1.0.data/headers/built_by_uv.h
+        built_by_uv-0.1.0.data/scripts/
+        built_by_uv-0.1.0.data/scripts/whoami.sh
+        built_by_uv-0.1.0.dist-info/
+        built_by_uv-0.1.0.dist-info/METADATA
+        built_by_uv-0.1.0.dist-info/RECORD
+        built_by_uv-0.1.0.dist-info/WHEEL
+        built_by_uv-0.1.0.dist-info/entry_points.txt
+        built_by_uv-0.1.0.dist-info/licenses/
+        built_by_uv-0.1.0.dist-info/licenses/LICENSE-APACHE
+        built_by_uv-0.1.0.dist-info/licenses/LICENSE-MIT
+        built_by_uv-0.1.0.dist-info/licenses/third-party-licenses/
+        built_by_uv-0.1.0.dist-info/licenses/third-party-licenses/PEP-401.txt
+        built_by_uv/
+        built_by_uv/__init__.py
+        built_by_uv/arithmetic/
+        built_by_uv/arithmetic/__init__.py
+        built_by_uv/arithmetic/circle.py
+        built_by_uv/arithmetic/pi.txt
+        built_by_uv/cli.py
+        ");
+        assert_snapshot!(format_file_list(build.wheel_list_files, src.path()), @"
+        built_by_uv/__init__.py (src/built_by_uv/__init__.py)
+        built_by_uv/arithmetic/__init__.py (src/built_by_uv/arithmetic/__init__.py)
+        built_by_uv/arithmetic/circle.py (src/built_by_uv/arithmetic/circle.py)
+        built_by_uv/arithmetic/pi.txt (src/built_by_uv/arithmetic/pi.txt)
+        built_by_uv/cli.py (src/built_by_uv/cli.py)
+        built_by_uv-0.1.0.dist-info/licenses/LICENSE-APACHE (LICENSE-APACHE)
+        built_by_uv-0.1.0.dist-info/licenses/LICENSE-MIT (LICENSE-MIT)
+        built_by_uv-0.1.0.dist-info/licenses/third-party-licenses/PEP-401.txt (third-party-licenses/PEP-401.txt)
+        built_by_uv-0.1.0.data/headers/built_by_uv.h (header/built_by_uv.h)
+        built_by_uv-0.1.0.data/scripts/whoami.sh (scripts/whoami.sh)
+        built_by_uv-0.1.0.data/data/data.csv (assets/data.csv)
+        built_by_uv-0.1.0.dist-info/WHEEL (generated)
+        built_by_uv-0.1.0.dist-info/entry_points.txt (generated)
+        built_by_uv-0.1.0.dist-info/METADATA (generated)
+        ");
+
+        let record = wheel_entry(&wheel_path, "built_by_uv-0.1.0.dist-info/RECORD");
+        assert_snapshot!(record, @"
+        built_by_uv/__init__.py,sha256=AJ7XpTNWxYktP97ydb81UpnNqoebH7K4sHRakAMQKG4,44
+        built_by_uv/arithmetic/__init__.py,sha256=x2agwFbJAafc9Z6TdJ0K6b6bLMApQdvRSQjP4iy7IEI,67
+        built_by_uv/arithmetic/circle.py,sha256=FYZkv6KwrF9nJcwGOKigjke1dm1Fkie7qW1lWJoh3AE,287
+        built_by_uv/arithmetic/pi.txt,sha256=-4HqoLoIrSKGf0JdTrM8BTTiIz8rq-MSCDL6LeF0iuU,8
+        built_by_uv/cli.py,sha256=Jcm3PxSb8wTAN3dGm5vKEDQwCgoUXkoeggZeF34QyKM,44
+        built_by_uv-0.1.0.dist-info/licenses/LICENSE-APACHE,sha256=QwcOLU5TJoTeUhuIXzhdCEEDDvorGiC6-3YTOl4TecE,11356
+        built_by_uv-0.1.0.dist-info/licenses/LICENSE-MIT,sha256=F5Z0Cpu8QWyblXwXhrSo0b9WmYXQxd1LwLjVLJZwbiI,1077
+        built_by_uv-0.1.0.dist-info/licenses/third-party-licenses/PEP-401.txt,sha256=KN-KAx829G2saLjVmByc08RFFtIDWvHulqPyD0qEBZI,270
+        built_by_uv-0.1.0.data/headers/built_by_uv.h,sha256=p5-HBunJ1dY-xd4dMn03PnRClmGyRosScIp8rT46kg4,144
+        built_by_uv-0.1.0.data/scripts/whoami.sh,sha256=T2cmhuDFuX-dTkiSkuAmNyIzvv8AKopjnuTCcr9o-eE,20
+        built_by_uv-0.1.0.data/data/data.csv,sha256=7z7u-wXu7Qr2eBZFVpBILlNUiGSngv_1vYqZHVWOU94,265
+        built_by_uv-0.1.0.dist-info/WHEEL,sha256=JBpLtoa_WBz5WPGpRsAUTD4Dz6H0KkkdiKWCkfMSS1U,84
+        built_by_uv-0.1.0.dist-info/entry_points.txt,sha256=-IO6yaq6x6HSl-zWH96rZmgYvfyHlH00L5WQoCpz-YI,50
+        built_by_uv-0.1.0.dist-info/METADATA,sha256=m6EkVvKrGmqx43b_VR45LHD37IZxPYC0NI6Qx9_UXLE,474
+        built_by_uv-0.1.0.dist-info/RECORD,,
+        ");
+    }
+
+    fn prepare_built_by_uv(
+        preview_features: &[PreviewFeature],
+    ) -> (TempDir, TempDir, BuildResults) {
+        let _preview = uv_preview::test::with_features(preview_features);
+        let built_by_uv = Path::new("../../test/packages/built-by-uv");
+        let src = TempDir::new().unwrap();
+        for dir in [
+            "src",
+            "tests",
+            "data-dir",
+            "third-party-licenses",
+            "assets",
+            "header",
+            "scripts",
+        ] {
+            copy_dir_all(built_by_uv.join(dir), src.path().join(dir)).unwrap();
+        }
+        for filename in [
+            "pyproject.toml",
+            "README.md",
+            "uv.lock",
+            "LICENSE-APACHE",
+            "LICENSE-MIT",
+        ] {
+            fs_err::copy(built_by_uv.join(filename), src.path().join(filename)).unwrap();
+        }
+
+        // Clear executable bit on Unix to build the same archive between Unix and Windows.
+        // This is a caveat to the determinism of the uv build backend: When a file has the
+        // executable in the source repository, it only has the executable bit on Unix, as Windows
+        // does not have the concept of the executable bit.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let path = src.path().join("scripts").join("whoami.sh");
+            let metadata = fs_err::metadata(&path).unwrap();
+            let mut perms = metadata.permissions();
+            perms.set_mode(perms.mode() & !0o111);
+            fs_err::set_permissions(&path, perms).unwrap();
+        }
+
+        // Redact the uv_build version to keep the hash stable across releases
+        let pyproject_toml = fs_err::read_to_string(src.path().join("pyproject.toml")).unwrap();
+        let current_requires = regex!(r#"requires = \["uv_build>=[0-9.]+,<[0-9.]+"\]"#);
+        let mocked_requires = r#"requires = ["uv_build>=1,<2"]"#;
+        let pyproject_toml = current_requires.replace(pyproject_toml.as_str(), mocked_requires);
+        fs_err::write(src.path().join("pyproject.toml"), pyproject_toml.as_bytes()).unwrap();
+
+        // Add some files to be excluded
+        let module_root = src.path().join("src").join("built_by_uv");
+        fs_err::create_dir_all(module_root.join("__pycache__")).unwrap();
+        File::create(module_root.join("__pycache__").join("compiled.pyc")).unwrap();
+        File::create(module_root.join("arithmetic").join("circle.pyc")).unwrap();
+        fs_err::create_dir_all(module_root.join("empty")).unwrap();
+        fs_err::create_dir_all(module_root.join("stale").join("__pycache__")).unwrap();
+        File::create(
+            module_root
+                .join("stale")
+                .join("__pycache__")
+                .join("compiled.pyc"),
+        )
+        .unwrap();
+
+        // Perform both the direct and the indirect build.
+        let dist = TempDir::new().unwrap();
+        let build = build(src.path(), dist.path()).unwrap();
+
+        (src, dist, build)
     }
 
     /// Test that `license = { file = "LICENSE" }` is supported.

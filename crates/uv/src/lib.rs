@@ -3074,6 +3074,20 @@ where
     I: IntoIterator<Item = T>,
     T: Into<OsString> + Clone,
 {
+    // SAFETY: the caller guarantees single-threaded process startup.
+    unsafe { main_status(args) }.into()
+}
+
+/// Runs a single uv invocation and returns its command status to a native host.
+///
+/// # Safety
+/// The process must be single-threaded and this entry point must be called only once.
+#[expect(unsafe_code)]
+pub unsafe fn main_status<I, T>(args: I) -> ExitStatus
+where
+    I: IntoIterator<Item = T>,
+    T: Into<OsString> + Clone,
+{
     #[cfg(windows)]
     uv_windows::install_unhandled_exception_handler();
 
@@ -3133,7 +3147,7 @@ where
         .expect("Tokio executor failed, was there a panic?");
 
     match result {
-        Ok(code) => code.into(),
+        Ok(code) => code,
         Err(err) => {
             let error = match err.downcast::<UvError>() {
                 Ok(error) => error,
@@ -3144,12 +3158,12 @@ where
                 UvError::User(err) => {
                     commands::diagnostics::write_error_chain(&err, printer)
                         .expect("writing to stderr should not fail");
-                    ExitStatus::Failure.into()
+                    ExitStatus::Failure
                 }
                 UvError::Argument(err) => {
                     commands::diagnostics::write_error_chain(&err, printer)
                         .expect("writing to stderr should not fail");
-                    ExitStatus::Error.into()
+                    ExitStatus::Error
                 }
                 UvError::Unexpected(err) => {
                     trace!(
@@ -3161,7 +3175,7 @@ where
                     }
                     commands::diagnostics::write_error_chain(&err, printer)
                         .expect("writing to stderr should not fail");
-                    ExitStatus::Error.into()
+                    ExitStatus::Error
                 }
             }
         }

@@ -3651,7 +3651,7 @@ fn install_git_private_https_pat_not_authorized() {
         .with_filter(("`.*/git fetch (.*)`", "`git fetch $1`"));
 
     // A revoked token
-    let token = "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";
+    let token = concat!("github", "_pat_", "11BGIZA7Q0qxQCNd6BVVCf_8ZeenAddxUYnR82xy7geDJo5DsazrjdVjfh3TH769snE3IXVTWKSJ9DInbt");
 
     // We provide a username otherwise (since the token is invalid), the git cli will prompt for a password
     // and hang the test

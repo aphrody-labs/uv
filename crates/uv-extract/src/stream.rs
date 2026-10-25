@@ -2,6 +2,8 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 
+use async_compression::codecs::Xz2Decoder;
+use async_compression::codecs::lzma::params::LzmaDecoderParams;
 use async_zip::base::read::cd::Entry;
 use async_zip::error::ZipError;
 use futures::executor::block_on;
@@ -32,6 +34,7 @@ use crate::{Error, insecure_no_validate};
 
 /// Default buffer size for streaming archive reads and file copies.
 const DEFAULT_BUF_SIZE: usize = 128 * 1024;
+const LZMA_MEMORY_LIMIT: u64 = 256 * 1024 * 1024;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct LocalHeaderEntry {
@@ -920,6 +923,66 @@ async fn untar_zst<R: tokio::io::AsyncRead + Unpin>(
     untar_in(decompressed_bytes, target.as_ref()).await
 }
 
+async fn untar_compressed<R: AsyncRead + Unpin>(
+    mut reader: R,
+    target: &Path,
+) -> Result<Vec<UnhashedFile>, Error> {
+    let files = untar_in(&mut reader, target).await?;
+    // Tar's end marker can precede a compressed checksum trailer or another compressed member.
+    tokio::io::copy(&mut reader, &mut tokio::io::sink())
+        .await
+        .map_err(Error::Io)?;
+    Ok(files)
+}
+
+async fn untar_bz2<R: AsyncRead + Unpin>(
+    reader: R,
+    target: &Path,
+) -> Result<Vec<UnhashedFile>, Error> {
+    let reader = tokio::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, reader);
+    let mut decoder = async_compression::tokio::bufread::BzDecoder::new(reader);
+    decoder.multiple_members(true);
+    untar_compressed(decoder, target).await
+}
+
+async fn untar_xz<R: AsyncRead + Unpin>(
+    reader: R,
+    target: &Path,
+) -> Result<Vec<UnhashedFile>, Error> {
+    let reader = tokio::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, reader);
+    let mut decoder =
+        async_compression::tokio::bufread::XzDecoder::with_mem_limit(reader, LZMA_MEMORY_LIMIT);
+    decoder.multiple_members(true);
+    untar_compressed(decoder, target).await
+}
+
+async fn untar_lzma<R: AsyncRead + Unpin>(
+    reader: R,
+    target: &Path,
+) -> Result<Vec<UnhashedFile>, Error> {
+    let reader = tokio::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, reader);
+    let decoder =
+        async_compression::tokio::bufread::LzmaDecoder::with_mem_limit(reader, LZMA_MEMORY_LIMIT);
+    untar_compressed(decoder, target).await
+}
+
+async fn untar_lzip<R: AsyncRead + Unpin>(
+    reader: R,
+    target: &Path,
+) -> Result<Vec<UnhashedFile>, Error> {
+    let reader = tokio::io::BufReader::with_capacity(DEFAULT_BUF_SIZE, reader);
+    let codec = Xz2Decoder::try_from(LzmaDecoderParams::Lzip {
+        mem_limit: LZMA_MEMORY_LIMIT,
+        flags: 0,
+    })
+    .map_err(io::Error::from)
+    .map_err(Error::Io)?;
+    let mut decoder =
+        async_compression::tokio::bufread::LzmaDecoder::with_codec(reader, codec.into());
+    decoder.multiple_members(true);
+    untar_compressed(decoder, target).await
+}
+
 /// Unpack a `.tar` archive into the target directory, without requiring `Seek`.
 ///
 /// This is useful for unpacking files as they're being downloaded.
@@ -933,7 +996,7 @@ async fn untar<R: tokio::io::AsyncRead + Unpin>(
     untar_in(reader, target.as_ref()).await
 }
 
-/// Unpack a `.zip`, `.tar.gz`, or `.tar.zst` archive into the target directory,
+/// Unpack a ZIP or a supported compressed tar archive into the target directory,
 /// without requiring `Seek`.
 ///
 /// Returns the temporary directory and the list of unpacked files and their sizes.
@@ -956,7 +1019,18 @@ pub async fn archive(
         SourceDistExtension::Legacy(LegacySourceDistExtension::TarZst) => {
             untar_zst(reader, target.path()).await
         }
-        SourceDistExtension::Legacy(_) => Err(Error::UnsupportedCompression),
+        SourceDistExtension::Legacy(
+            LegacySourceDistExtension::TarBz2 | LegacySourceDistExtension::Tbz,
+        ) => untar_bz2(reader, target.path()).await,
+        SourceDistExtension::Legacy(
+            LegacySourceDistExtension::TarXz | LegacySourceDistExtension::Txz,
+        ) => untar_xz(reader, target.path()).await,
+        SourceDistExtension::Legacy(LegacySourceDistExtension::TarLzma) => {
+            untar_lzma(reader, target.path()).await
+        }
+        SourceDistExtension::Legacy(
+            LegacySourceDistExtension::TarLz | LegacySourceDistExtension::Tlz,
+        ) => untar_lzip(reader, target.path()).await,
     }?;
     Ok((target, files))
 }
